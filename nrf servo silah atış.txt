@@ -1,112 +1,146 @@
-alıcı
+VERICI (TRANSMITTER) KODU
+
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+#define CE_PIN 9
+#define CSN_PIN 10
+#define BUTTON_PIN 2
+#define LED_PIN 8
+#define DEBOUNCE_TIME 250
+#define ACTIVE_TIME 1000
+
+RF24 radio(CE_PIN, CSN_PIN);
+const byte address[6] = "00001";
+
+struct DataPackage {
+  bool buttonPressed;
+  uint32_t packetId;
+};
+
+volatile bool eventTriggered = false;
+volatile uint32_t lastInterruptTime = 0;
+DataPackage dataPayload = {false, 0};
+
+bool activeState = false;
+uint32_t actionStartTime = 0;
+
+void IRAM_ATTR buttonISR() {
+  uint32_t currentTime = millis();
+  if (currentTime - lastInterruptTime > DEBOUNCE_TIME) {
+    eventTriggered = true;
+    lastInterruptTime = currentTime;
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), buttonISR, FALLING);
+
+  if (!radio.begin()) {
+    while (1);
+  }
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.setRetries(5, 15);
+  radio.openWritingPipe(address);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.stopListening();
+}
+
+void loop() {
+  if (eventTriggered) {
+    eventTriggered = false;
+    dataPayload.buttonPressed = true;
+    dataPayload.packetId++;
+    
+    if (radio.write(&dataPayload, sizeof(dataPayload))) {
+      digitalWrite(LED_PIN, HIGH);
+      activeState = true;
+      actionStartTime = millis();
+    }
+    
+    Serial.print("TX ID: ");
+    Serial.println(dataPayload.packetId);
+  }
+
+  if (activeState && (millis() - actionStartTime >= ACTIVE_TIME)) {
+    digitalWrite(LED_PIN, LOW);
+    activeState = false;
+    dataPayload.buttonPressed = false;
+  }
+}
+
+***********************************************************************************************
+
+ALICI (RECEIVER) KODU
+
 #include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
 #include <Servo.h>
 
-// NRF24L01 radyo modülü için tanımlamalar
-RF24 radio(9, 10); // CE, CSN
+#define CE_PIN 9
+#define CSN_PIN 10
+#define SERVO_PIN 3
+#define SERVO_TARGET_POS 0
+#define SERVO_DEFAULT_POS 80
+#define ACTION_DURATION 1000
+
+RF24 radio(CE_PIN, CSN_PIN);
 const byte address[6] = "00001";
 
-// Servo için tanımlamalar
 Servo myServo;
-int servoPin = 3;
 
-// Gelen verilerin yapısı
 struct DataPackage {
   bool buttonPressed;
+  uint32_t packetId;
 };
 
-DataPackage data;
+DataPackage incomingData = {false, 0};
+uint32_t lastProcessedId = 0;
+
+bool isServoActive = false;
+uint32_t servoActionStartTime = 0;
 
 void setup() {
   Serial.begin(9600);
+  myServo.attach(SERVO_PIN);
+  myServo.write(SERVO_DEFAULT_POS);
 
-  // Servo pinini ayarla
-  myServo.attach(servoPin);
-
-  // Radyo modülünü başlat
-  radio.begin();
-  radio.setDataRate(RF24_2MBPS); // Veri hızını 2 Mbps olarak ayarla
-  radio.openReadingPipe(0, address);
-  radio.setPALevel(RF24_PA_MIN);
+  if (!radio.begin()) {
+    while (1);
+  }
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.openReadingPipe(1, address);
+  radio.setPALevel(RF24_PA_MAX);
   radio.startListening();
 }
 
 void loop() {
   if (radio.available()) {
-    radio.read(&data, sizeof(data));
+    radio.read(&incomingData, sizeof(incomingData));
 
-    // Seri port üzerinden veri gönder
-    Serial.print("Button Pressed: ");
-    Serial.println(data.buttonPressed);
-
-    // Butona basıldığında servo motoru 45 dereceye döndürüp geri getir
-    if (data.buttonPressed) {
-      myServo.write(0); // Servo motoru 45 dereceye döndür
-      delay(1000); // 1 saniye bekle
-      myServo.write(80); // Servo motoru başlangıç pozisyonuna döndür
-
-      // Tekrar buttonPressed'i false yaparak iki kez çalışmasını önle
-      data.buttonPressed = false;
+    if (incomingData.buttonPressed && (incomingData.packetId != lastProcessedId)) {
+      lastProcessedId = incomingData.packetId;
+      myServo.write(SERVO_TARGET_POS);
+      isServoActive = true;
+      servoActionStartTime = millis();
+      
+      Serial.print("RX Executed ID: ");
+      Serial.println(lastProcessedId);
     }
   }
 
-  delay(50); // Kısa bir gecikme
-}
-*****************************
-verici
-#include <SPI.h>
-#include <nRF24L01.h>
-#include <RF24.h>
-
-// NRF24L01 radyo modülü için tanımlamalar
-RF24 radio(9, 10); // CE, CSN
-const byte address[6] = "00001";
-
-// Joystick için tanımlamalar
-int buttonPin = 7; // Buton için dijital pin (Joystick modülündeki "SW" pini)
-int ledPin = 8; // LED için pin (atış durumunu göstermek için)
-
-struct DataPackage {
-  bool buttonPressed;
-};
-
-DataPackage data;
-
-void setup() {
-  Serial.begin(9600);
-
-  // Joystick buton pinini giriş olarak ayarla
-  pinMode(buttonPin, INPUT_PULLUP);
-  pinMode(ledPin, OUTPUT);
-
-  // Radyo modülünü başlat
-  radio.begin();
-  radio.setDataRate(RF24_2MBPS); // Veri hızını 2 Mbps olarak ayarla
-  radio.openWritingPipe(address);
-  radio.setPALevel(RF24_PA_MIN);
-}
-
-void loop() {
-  // Joystick buttonPressed değerini oku
-  data.buttonPressed = digitalRead(buttonPin) == LOW; // Buton basılıysa LOW (0)
-
-  // Veriyi radyo ile gönder
-  radio.stopListening();
-  radio.write(&data, sizeof(data));
-  radio.startListening();
-
-  // Buton basıldığında LED'i yak
-  if (data.buttonPressed) {
-    digitalWrite(ledPin, HIGH); // LED'i yak
-    delay(1000); // 1 saniye bekle
-    digitalWrite(ledPin, LOW); // LED'i söndür
+  if (isServoActive && (millis() - servoActionStartTime >= ACTION_DURATION)) {
+    myServo.write(SERVO_DEFAULT_POS);
+    isServoActive = false;
   }
-
-  // Seri port üzerinden veri gönder
-  Serial.print("Button Pressed: ");
-  Serial.println(data.buttonPressed);
-
-  delay(50); // Kısa bir gecikme
 }
+
+
