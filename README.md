@@ -31,7 +31,7 @@ Eğer alıcı açık ve aynı frekans kanalını (channel) ve adresi (address) d
  Güvenlik / Kontrol Sorunu: Cihazların birbiriyle fiziksel olarak bağlı kalmaması, sinyalin kesildiğinin veya cihazın kapsama alanı dışına 
  çıktığının anlaşılmasını zorlaştırır.
 
-Çözüm (RF Watchdog): Bu sorunu çözmek için alıcı koduna bir Watchdog (Bekçi Köpeği) Zamanlayıcısı eklenmelidir. Alıcı, örneğin son 1
+Çözüm (RF Watchdog): Bu sorunu çözmek için alıcı koduna bir Watchdog  Zamanlayıcısı eklenmelidir. Alıcı, örneğin son 1
 saniye içinde yeni bir paket almadıysa, bağlantının koptuğunu varsayarak motorları ve kritik sistemleri güvenlik amacıyla otomatik olarak durdurmalıdır.
 
 3. Hız Sorunları ve RF24_2MBPS Yapılandırmasının Önemi
