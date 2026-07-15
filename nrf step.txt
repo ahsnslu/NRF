@@ -1,0 +1,175 @@
+VERICI (TRANSMITTER) KODU
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+#define CE_PIN 9
+#define CSN_PIN 10
+#define DIR_CONTROL_PIN 7
+#define VELOCITY_POT_PIN A0
+#define TELEMETRY_INTERVAL_MS 20
+#define DEBOUNCE_DELAY_MS 40
+
+RF24 radio(CE_PIN, CSN_PIN);
+const byte transmissionAddress[6] = "00001";
+
+struct TurretControlPayload {
+  uint32_t transactionId;
+  uint16_t velocityAnalog;
+  uint8_t rotationDirection;
+};
+
+TurretControlPayload txPayload = {0, 0, 0};
+uint32_t lastTransmissionTimestamp = 0;
+uint32_t lastDebounceTimestamp = 0;
+bool previousPhysicalButtonState = HIGH;
+bool stabilizedButtonState = HIGH;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(DIR_CONTROL_PIN, INPUT_PULLUP);
+  
+  if (!radio.begin()) {
+    while (1);
+  }
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.setRetries(2, 8);
+  radio.openWritingPipe(transmissionAddress);
+  radio.stopListening();
+}
+
+void loop() {
+  uint32_t currentMillis = millis();
+  bool currentPhysicalButtonState = digitalRead(DIR_CONTROL_PIN);
+
+  if (currentPhysicalButtonState != previousPhysicalButtonState) {
+    lastDebounceTimestamp = currentMillis;
+  }
+
+  if ((currentMillis - lastDebounceTimestamp) > DEBOUNCE_DELAY_MS) {
+    if (currentPhysicalButtonState != stabilizedButtonState) {
+      stabilizedButtonState = currentPhysicalButtonState;
+    }
+  }
+  previousPhysicalButtonState = currentPhysicalButtonState;
+
+  if (currentMillis - lastTransmissionTimestamp >= TELEMETRY_INTERVAL_MS) {
+    txPayload.velocityAnalog = analogRead(VELOCITY_POT_PIN);
+    txPayload.rotationDirection = (stabilizedButtonState == LOW) ? 1 : 0;
+    txPayload.transactionId++;
+
+    bool transmissionStatus = radio.write(&txPayload, sizeof(txPayload));
+    
+    if (transmissionStatus) {
+      Serial.print("TX Success | ID: ");
+    } else {
+      Serial.print("TX Failure | ID: ");
+    }
+    Serial.print(txPayload.transactionId);
+    Serial.print(" | VEL: ");
+    Serial.print(txPayload.velocityAnalog);
+    Serial.print(" | DIR: ");
+    Serial.println(txPayload.rotationDirection);
+
+    lastTransmissionTimestamp = currentMillis;
+  }
+}
+
+*************************************************************************************************
+
+ALICI (RECEIVER) KODU
+
+#include <SPI.h>
+#include <nRF24L01.h>
+#include <RF24.h>
+
+#define CE_PIN 9
+#define CSN_PIN 10
+#define TURRET_STEP_PIN 3
+#define TURRET_DIR_PIN 4
+#define SYSTEM_WATCHDOG_TIMEOUT_MS 800
+
+RF24 radio(CE_PIN, CSN_PIN);
+const byte transmissionAddress[6] = "00001";
+
+struct TurretControlPayload {
+  uint32_t transactionId;
+  uint16_t velocityAnalog;
+  uint8_t rotationDirection;
+};
+
+TurretControlPayload rxPayload;
+uint32_t lastReceptionTimestamp = 0;
+uint32_t lastProcessedTransactionId = 0;
+bool isLinkEstablished = false;
+
+uint32_t lastStepExecutionMicros = 0;
+uint32_t adaptiveStepDelayMicros = 0;
+bool stepExcitationState = LOW;
+bool targetDirectionState = LOW;
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(TURRET_STEP_PIN, OUTPUT);
+  pinMode(TURRET_DIR_PIN, OUTPUT);
+  digitalWrite(TURRET_STEP_PIN, LOW);
+  digitalWrite(TURRET_DIR_PIN, LOW);
+
+  if (!radio.begin()) {
+    while (1);
+  }
+  radio.setDataRate(RF24_2MBPS);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.openReadingPipe(1, transmissionAddress);
+  radio.setPALevel(RF24_PA_MAX);
+  radio.startListening();
+}
+
+void loop() {
+  uint32_t currentMillis = millis();
+  uint32_t currentMicros = micros();
+
+  if (radio.available()) {
+    radio.read(&rxPayload, sizeof(rxPayload));
+    
+    if (rxPayload.transactionId != lastProcessedTransactionId) {
+      lastProcessedTransactionId = rxPayload.transactionId;
+      lastReceptionTimestamp = currentMillis;
+      isLinkEstablished = true;
+
+      targetDirectionState = (rxPayload.rotationDirection == 1) ? HIGH : LOW;
+      digitalWrite(TURRET_DIR_PIN, targetDirectionState);
+
+      if (rxPayload.velocityAnalog > 15) {
+        adaptiveStepDelayMicros = map(rxPayload.velocityAnalog, 16, 1023, 3000, 200);
+      } else {
+        adaptiveStepDelayMicros = 0; 
+      }
+
+      Serial.print("RX ID: ");
+      Serial.print(rxPayload.transactionId);
+      Serial.print(" | Step Delay (us): ");
+      Serial.print(adaptiveStepDelayMicros);
+      Serial.print(" | Target DIR: ");
+      Serial.println(targetDirectionState);
+    }
+  }
+
+  if (isLinkEstablished && (adaptiveStepDelayMicros > 0)) {
+    if (currentMicros - lastStepExecutionMicros >= adaptiveStepDelayMicros) {
+      stepExcitationState = !stepExcitationState;
+      digitalWrite(TURRET_STEP_PIN, stepExcitationState);
+      lastStepExecutionMicros = currentMicros;
+    }
+  }
+
+  if (isLinkEstablished && (currentMillis - lastReceptionTimestamp >= SYSTEM_WATCHDOG_TIMEOUT_MS)) {
+    isLinkEstablished = false;
+    adaptiveStepDelayMicros = 0;
+    digitalWrite(TURRET_STEP_PIN, LOW);
+    Serial.println("CRITICAL: Communication Timeout! Turret Drive Halted.");
+  }
+}
