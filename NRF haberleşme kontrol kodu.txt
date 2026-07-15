@@ -1,80 +1,177 @@
-#include<SPI.h>
+VERICI (TRANSMITTER) KODU
+
+#include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
-RF24 radio (9,10); //ce csn
-const byte kanal[6] = "00001";
-int mesaj[2];
-#define buton 7
-#define X A0
-//#define Y A1
+
+#define CE_PIN 9
+#define CSN_PIN 10
+#define BUTTON_PIN 7
+#define ANALOG_X_PIN A0
+#define TRANSMIT_INTERVAL 30
+#define DEBOUNCE_DELAY 50
+
+RF24 radio(CE_PIN, CSN_PIN);
+const byte address[6] = "00001";
+
+struct TelemetryPackage {
+  uint32_t packetId;
+  uint16_t joystickX;
+  uint8_t buttonState;
+};
+
+TelemetryPackage txData = {0, 0, 0};
+uint32_t lastTxTime = 0;
+uint32_t lastDebounceTime = 0;
+bool lastPhysicalButtonState = HIGH;
+bool stableButtonState = HIGH;
+
 void setup() {
   Serial.begin(9600);
-  radio.begin();
-  radio.openWritingPipe(kanal);
-   radio.setPALevel(RF24_PA_MIN);
-   radio.setDataRate( RF24_250KBPS );
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  
+  if (!radio.begin()) {
+    while (1);
+  }
+  radio.setDataRate(RF24_250KBPS);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.setPALevel(RF24_PA_MIN);
+  radio.setRetries(3, 10);
+  radio.openWritingPipe(address);
   radio.stopListening();
-pinMode(buton,INPUT_PULLUP);
-pinMode(X,INPUT);
-//pinMode(Y,INPUT);
 }
 
 void loop() {
-  int x=analogRead(X);
-//  int y=analogRead(Y);
-int a=digitalRead(buton);
-  if(a==0){
-    mesaj[0]=50;
-  }else{mesaj[0]=0;}
-    mesaj[1]=x;
-  radio.write(&mesaj,sizeof(mesaj));
-  Serial.println("x: ");Serial.println(x);
- // Serial.println("y: ");Serial.println(y);
-  Serial.println(digitalRead(buton));
+  uint32_t currentTime = millis();
+  bool currentPhysicalButtonState = digitalRead(BUTTON_PIN);
 
+  if (currentPhysicalButtonState != lastPhysicalButtonState) {
+    lastDebounceTime = currentTime;
+  }
 
+  if ((currentTime - lastDebounceTime) > DEBOUNCE_DELAY) {
+    if (currentPhysicalButtonState != stableButtonState) {
+      stableButtonState = currentPhysicalButtonState;
+    }
+  }
+  lastPhysicalButtonState = currentPhysicalButtonState;
+
+  if (currentTime - lastTxTime >= TRANSMIT_INTERVAL) {
+    txData.joystickX = analogRead(ANALOG_X_PIN);
+    txData.buttonState = (stableButtonState == LOW) ? 50 : 0;
+    txData.packetId++;
+
+    bool transmitSuccess = radio.write(&txData, sizeof(txData));
+    
+    if (transmitSuccess) {
+      Serial.print("TX Success | ID: ");
+    } else {
+      Serial.print("TX Failure | ID: ");
+    }
+    Serial.print(txData.packetId);
+    Serial.print(" | X: ");
+    Serial.print(txData.joystickX);
+    Serial.print(" | BTN: ");
+    Serial.println(txData.buttonState);
+
+    lastTxTime = currentTime;
+  }
 }
 
-**************************************************************************************************************************************************************************************
-//Alıcı
-#include<SPI.h>
+******************************************************************************************************
+
+ALICI (RECEIVER) KODU
+
+#include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
-#include<Servo.h>
-Servo s;
-RF24 radio (9,10); //ce csn
-const byte kanal[6] = "00001";
-int mesaj[2];
-int led=4;
+#include <Servo.h>
+
+#define CE_PIN 9
+#define CSN_PIN 10
+#define SERVO_PIN 8
+#define LED_PIN 4
+#define LINK_TIMEOUT 1000
+#define LED_ACTIVE_DURATION 100
+#define SERVO_WRITE_INTERVAL 15
+
+RF24 radio(CE_PIN, CSN_PIN);
+const byte address[6] = "00001";
+Servo feedbackServo;
+
+struct TelemetryPackage {
+  uint32_t packetId;
+  uint16_t joystickX;
+  uint8_t buttonState;
+};
+
+TelemetryPackage rxData;
+uint32_t lastRxTimestamp = 0;
+uint32_t lastServoWriteTimestamp = 0;
+uint32_t ledActivationTimestamp = 0;
+uint32_t lastProcessedPacketId = 0;
+bool isLedActive = false;
+bool isLinkConnected = false;
+
 void setup() {
   Serial.begin(9600);
-  s.attach(8);
-  radio.begin();
-  delay(1000);
-  radio.openReadingPipe(0,kanal);
-   radio.setPALevel(RF24_PA_MIN);
-   radio.setDataRate( RF24_250KBPS );
-  radio.startListening();  
-pinMode(led,OUTPUT);
+  feedbackServo.attach(SERVO_PIN);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
+  if (!radio.begin()) {
+    while (1);
+  }
+  radio.setDataRate(RF24_250KBPS);
+  radio.setCRCLength(RF24_CRC_16);
+  radio.openReadingPipe(1, address);
+  radio.setPALevel(RF24_PA_MIN);
+  radio.startListening();
 }
 
 void loop() {
-  while(radio.available()){
+  uint32_t currentTime = millis();
 
+  if (radio.available()) {
+    radio.read(&rxData, sizeof(rxData));
+    
+    if (rxData.packetId != lastProcessedPacketId) {
+      lastProcessedPacketId = rxData.packetId;
+      lastRxTimestamp = currentTime;
+      isLinkConnected = true;
 
-      radio.read(&mesaj,sizeof(mesaj));
-      Serial.println(mesaj[0]);
-      if(mesaj[0]==50){
-
-        digitalWrite(led,HIGH);   
-        delay(100);
+      if (rxData.buttonState == 50) {
+        digitalWrite(LED_PIN, HIGH);
+        isLedActive = true;
+        ledActivationTimestamp = currentTime;
       }
 
+      if (currentTime - lastServoWriteTimestamp >= SERVO_WRITE_INTERVAL) {
+        uint8_t mappedAngle = map(rxData.joystickX, 0, 1023, 0, 180);
+        feedbackServo.write(mappedAngle);
+        lastServoWriteTimestamp = currentTime;
+      }
 
-      digitalWrite(led,LOW);
+      Serial.print("RX ID: ");
+      Serial.print(rxData.packetId);
+      Serial.print(" | X: ");
+      Serial.print(rxData.joystickX);
+      Serial.print(" | BTN: ");
+      Serial.println(rxData.buttonState);
+    }
+  }
+
+  if (isLedActive && (currentTime - ledActivationTimestamp >= LED_ACTIVE_DURATION)) {
+    digitalWrite(LED_PIN, LOW);
+    isLedActive = false;
+  }
+
+  if (isLinkConnected && (currentTime - lastRxTimestamp >= LINK_TIMEOUT)) {
+    isLinkConnected = false;
+    Serial.println("CRITICAL WARNING: RF Link Connection Lost!");
+    digitalWrite(LED_PIN, LOW);
+    isLedActive = false;
+  }
+}
 
 
-     s.write(mesaj[1]);
-  delay(20);
-}}
